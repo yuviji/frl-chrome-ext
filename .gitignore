@@ -1,0 +1,36 @@
+# Node
+node_modules/
+.pnpm-store/
+*.log
+pnpm-lock.yaml
+
+# Build outputs
+extension/dist/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.Python
+**/.venv/
+**/build/
+**/dist/
+**/*.egg-info/
+.venv/
+
+# Editors
+.vscode/
+.idea/
+
+# Env
+.env
+.env.*
+
+# Misc
+prompts

@@ -1,0 +1,13 @@
+[project]
+name = "modal_ocr"
+version = "0.0.0"
+requires-python = ">=3.9"
+description = "Modal-hosted OCR (skeleton)"
+readme = "README.md"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

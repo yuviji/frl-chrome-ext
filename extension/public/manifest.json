@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "FRL Recorder",
+  "version": "0.0.0",
+  "description": "Skeleton MV3 extension for recording actions.",
+  "permissions": [],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": {
+    "default_title": "FRL",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

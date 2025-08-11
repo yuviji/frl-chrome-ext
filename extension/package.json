@@ -1,0 +1,13 @@
+{
+  "name": "extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsup && node scripts/copy-assets.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.270",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2"
+  }
+}
