@@ -11,6 +11,21 @@
   </head>
   <body>
     <h3>FRL</h3>
-    <p class="muted">Skeleton popup</p>
+    <div style="display:flex; gap:8px; margin:8px 0;">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn">Stop</button>
+      <button id="downloadBtn">Download</button>
+    </div>
+    <hr/>
+    <div style="margin:8px 0;">
+      <label><input type="checkbox" id="allowlistToggle"/> Allowlist mode</label>
+      <div style="margin-top:6px; display:flex; gap:6px;">
+        <input id="domainInput" placeholder="example.com or https://example.com"/>
+        <button id="addDomainBtn">Add</button>
+      </div>
+      <ul id="domains" class="muted" style="margin-top:6px;"></ul>
+    </div>
+    <p id="status" class="muted">Idle</p>
+    <script type="module" src="popup.js"></script>
   </body>
 </html>

@@ -10,4 +10,6 @@
     "types": ["chrome"]
   },
   "include": ["src"]
+  ,
+  "exclude": ["dist"]
 }
