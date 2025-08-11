@@ -190,6 +190,47 @@ async function refreshPreviewLoop() {
 }
 refreshPreviewLoop();
 
+// Replayer UI wiring
+const thinkEl = document.getElementById("thinkRange") as HTMLInputElement | null;
+const thinkVal = document.getElementById("thinkVal") as HTMLSpanElement | null;
+if (thinkEl && thinkVal) {
+  const renderThink = () => {
+    const v = parseFloat(thinkEl.value || "1");
+    thinkVal.textContent = `${v.toFixed(2)}×`;
+  };
+  thinkEl.addEventListener("input", renderThink);
+  renderThink();
+}
+
+$("playBtn").addEventListener("click", async () => {
+  try {
+    const fileInput = document.getElementById("traceFile") as HTMLInputElement | null;
+    const file = fileInput?.files?.[0];
+    if (!file) {
+      setStatus("Choose a JSON trace first");
+      return;
+    }
+    const text = await file.text();
+    let trace: any;
+    try {
+      trace = JSON.parse(text);
+    } catch (e) {
+      setStatus("Invalid JSON file");
+      return;
+    }
+    const thinkScale = thinkEl ? parseFloat(thinkEl.value || "1") : 1;
+    const res = await chrome.runtime.sendMessage({ type: "FRL_POPUP_PLAY", trace, thinkScale });
+    setStatus(res?.ok ? "Play finished" : `Error: ${res?.error ?? "unknown"}`);
+  } catch (err) {
+    setStatus(`Error: ${String(err)}`);
+  }
+});
+
+$("stopPlayBtn").addEventListener("click", async () => {
+  const res = await chrome.runtime.sendMessage({ type: "FRL_POPUP_STOP_PLAY" });
+  setStatus(res?.ok ? "Stopped playback" : `Error: ${res?.error ?? "unknown"}`);
+});
+
 export {};
 
 
