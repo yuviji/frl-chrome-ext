@@ -34,3 +34,6 @@ extension/dist/
 
 # Misc
 prompts
+archived
+traces
+design-choices.txt

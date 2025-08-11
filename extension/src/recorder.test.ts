@@ -17,6 +17,8 @@ describe('recorder actions and predicates', () => {
     btn.textContent = 'Click Me'
     document.body.appendChild(btn)
 
+    // Ensure we simulate a starting URL before starting the recorder
+    history.replaceState({}, '', 'https://example.com/page')
     const recorder = createRecorder()
     recorder.start()
     dispatchClick(btn)
@@ -33,6 +35,7 @@ describe('recorder actions and predicates', () => {
     const dump = recorder.dump()
 
     expect(dump.steps.length).toBeGreaterThanOrEqual(2)
+    expect(dump.meta.startUrl).toBe(globalThis.location.href)
     const last = dump.steps[dump.steps.length - 1]
     const prev = dump.steps[dump.steps.length - 2]
     expect(prev.kind).toBe('action')

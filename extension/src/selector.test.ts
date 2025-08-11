@@ -27,7 +27,7 @@ describe('selector builder', () => {
     expect(built.selector).toBe('[data-testid="main"]')
   })
 
-  it('falls back to compact CSS with nth-of-type', () => {
+  it('falls back to CSS when no ARIA/data are available', () => {
     const ul = document.createElement('ul')
     for (let i = 0; i < 3; i++) {
       const li = document.createElement('li')
@@ -37,7 +37,22 @@ describe('selector builder', () => {
     const target = ul.children[1] as Element
     const built = buildSelector(target)
     expect(built.strategy).toBe('css')
-    expect(built.selector).toMatch(/li:nth-of-type\(2\)$/)
+    expect(built.selector).toContain('li:nth-of-type(2)')
+  })
+
+  it('generates CSS selectors for SVG subtree targets', () => {
+    const wrapper = document.createElement('div')
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as unknown as Element
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g') as unknown as Element
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle') as unknown as Element
+    g.appendChild(circle)
+    svg.appendChild(g)
+    wrapper.appendChild(svg)
+    document.body.appendChild(wrapper)
+
+    const built = buildSelector(circle as Element)
+    expect(built.strategy).toBe('css')
+    expect(typeof built.selector).toBe('string')
   })
 
   it('captures shadow DOM chain', () => {

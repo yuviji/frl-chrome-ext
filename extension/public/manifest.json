@@ -3,7 +3,7 @@
   "name": "FRL Recorder",
   "version": "0.0.0",
   "description": "Skeleton MV3 extension for recording actions.",
-  "permissions": ["storage"],
+  "permissions": ["debugger", "tabs", "webNavigation", "scripting", "storage"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": {

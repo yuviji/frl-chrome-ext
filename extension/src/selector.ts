@@ -46,7 +46,14 @@ export function buildSelector(target: Element): BuiltSelector {
   // Try ARIA role+name first
   const aria = buildAriaSelector(target);
   if (aria) {
-    return finalize(aria, "aria", shadowChain, frameChain, target);
+    const built = finalize(aria, "aria", shadowChain, frameChain, target);
+    built.nameMatch = "exact";
+    const ariaContains = buildAriaSelectorContains(target);
+    if (ariaContains) {
+      built.alternatives = built.alternatives ?? [];
+      built.alternatives.push({ strategy: "aria", selector: ariaContains, nameMatch: "contains" });
+    }
+    return built;
   }
 
   // Then data-* test attributes
@@ -55,7 +62,7 @@ export function buildSelector(target: Element): BuiltSelector {
     return finalize(dataSel, "data", shadowChain, frameChain, target);
   }
 
-  // Fallback to compact CSS with nth-of-type
+  // Final fallback to compact CSS with nth-of-type
   const css = buildCompactCssSelector(target, deepestRoot);
   return finalize(css, "css", shadowChain, frameChain, target);
 }
@@ -71,15 +78,55 @@ function finalize(selector: string, strategy: SelectorStrategy, shadowChain: str
   };
 }
 
+const DISALLOWED_ARIA_ROLES = new Set(["presentation", "none"]);
+const PREFERRED_ARIA_ROLES = new Set([
+  "button",
+  "link",
+  "checkbox",
+  "radio",
+  "switch",
+  "menuitem",
+  "option",
+  "tab",
+  "textbox",
+  "combobox",
+  "slider",
+  "heading",
+]);
+
 function buildAriaSelector(el: Element): string | null {
   // Prefer WAI-ARIA: role + accessible name approximation
   const role = roleHintFor(el);
-  const name = accessibleName(el);
-  if (role && name) {
-    // We use a pseudo selector syntax: role=<role> name=<name>
-    // Consumers can translate to their selector engine (e.g., Playwright getByRole)
-    return `role=${cssEsc(role)}\x20name=${cssEsc(name)}`;
-  }
+  const nameInfo = accessibleNameWithSource(el);
+  const name = nameInfo?.name;
+  const source = nameInfo?.source;
+  if (!role || !name) return null;
+  if (DISALLOWED_ARIA_ROLES.has(role)) return null;
+  // If role is not explicitly preferred, still allow but be stricter on text-based names
+  const isPreferredRole = PREFERRED_ARIA_ROLES.has(role);
+  const maxLen = isPreferredRole ? 80 : 60;
+  // Avoid huge names or names derived from massive text content
+  if (name.length > maxLen) return null;
+  if (source === "text" && name.length > 60) return null;
+  // We use a pseudo selector syntax: role=<role> name=<name>
+  // Consumers can translate to their selector engine (e.g., Playwright getByRole)
+  return `role=${cssEsc(role)}\x20name=${cssEsc(name)}`;
+}
+
+function buildAriaSelectorContains(el: Element): string | null {
+  const role = roleHintFor(el);
+  const info = accessibleNameWithSource(el);
+  const name = info?.name;
+  const source = info?.source;
+  if (!role || !name) return null;
+  if (DISALLOWED_ARIA_ROLES.has(role)) return null;
+  // Apply same constraints as exact
+  const isPreferredRole = PREFERRED_ARIA_ROLES.has(role);
+  const maxLen = isPreferredRole ? 80 : 60;
+  if (name.length > maxLen) return null;
+  if (source === "text" && name.length > 60) return null;
+    // contains/substring match marker ~=
+    return `role=${cssEsc(role)}\x20name~=${cssEsc(name)}`;
   return null;
 }
 
@@ -111,6 +158,8 @@ function buildCompactCssSelector(el: Element, root: Document | ShadowRoot): stri
   }
   return parts.join(" > ");
 }
+
+// (XPath generation removed)
 
 function cssPart(node: Element): string {
   // If element has id, prefer #id
@@ -199,16 +248,22 @@ function buildFrameChain(root: Document | ShadowRoot): { frameChain: string[] } 
   return { frameChain: chain };
 }
 
-// Very lightweight accessible name approximation
-function accessibleName(el: Element): string | null {
+// Lightweight accessible name approximation with source
+function accessibleNameWithSource(el: Element): { name: string; source: "aria-label" | "alt" | "title" | "text" } | null {
   const ariaLabel = el.getAttribute("aria-label");
-  if (ariaLabel) return ariaLabel.trim();
+  if (ariaLabel && ariaLabel.trim()) return { name: ariaLabel.trim(), source: "aria-label" };
+  const ariaLabelledBy = el.getAttribute("aria-labelledby");
+  if (ariaLabelledBy && ariaLabelledBy.trim()) {
+    // Simplify: treat as aria-label if present
+    return { name: ariaLabelledBy.trim(), source: "aria-label" };
+  }
   const alt = (el as HTMLImageElement).alt;
-  if (typeof alt === "string" && alt.trim()) return alt.trim();
+  if (typeof alt === "string" && alt.trim()) return { name: alt.trim(), source: "alt" };
   const title = el.getAttribute("title");
-  if (title) return title.trim();
+  if (title && title.trim()) return { name: title.trim(), source: "title" };
   const text = (el.textContent || "").trim().replace(/\s+/g, " ");
-  return text || null;
+  if (text) return { name: text, source: "text" };
+  return null;
 }
 
 export {};

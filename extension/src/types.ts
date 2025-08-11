@@ -5,6 +5,8 @@ export interface BuiltSelector {
   selector: string;
   // Preferred strategy used to build the selector
   strategy: SelectorStrategy;
+  // When strategy is 'aria', indicates how the accessible name should be matched
+  nameMatch?: "exact" | "contains";
   // If the target is inside shadow DOMs, these are selectors to traverse from document → deepest shadow host
   // in outer-to-inner order. Each entry can be queried in the previous root to get the next shadow host.
   shadowChain: string[];
@@ -13,6 +15,12 @@ export interface BuiltSelector {
   // Optional human-facing hints
   textHint?: string;
   roleHint?: string;
+  // Optional alternative selectors for fallback during replay
+  alternatives?: Array<{
+    strategy: SelectorStrategy;
+    selector: string;
+    nameMatch?: "exact" | "contains";
+  }>;
 }
 
 export type ActionKind =
@@ -45,6 +53,7 @@ export interface WaitPredicateStep {
   predicate: PredicateName;
   container?: BuiltSelector;
   meta?: Record<string, unknown>;
+  tabLid?: number;
   timestamp: number;
 }
 
@@ -54,6 +63,8 @@ export interface TraceMeta {
   startedAt?: string;
   userAgent?: string;
   viewport?: { width: number; height: number };
+  // URL of the page where recording started; used by replayer to navigate first
+  startUrl?: string;
 }
 
 export interface TracePayload {

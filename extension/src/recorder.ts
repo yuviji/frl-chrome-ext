@@ -31,11 +31,13 @@ export class Recorder {
   private scrollBuffer: { el: Element; dx: number; dy: number } | null = null;
   private scrollFlushTimer: number | undefined;
   private initializedHistoryPatch = false;
+  private startUrl: string | null = null;
 
   start() {
     if (this.isRecording) return;
     this.isRecording = true;
     this.steps = [];
+    this.startUrl = location.href;
     this.installListeners();
   }
 
@@ -52,6 +54,7 @@ export class Recorder {
       startedAt: new Date().toISOString(),
       userAgent: navigator.userAgent,
       viewport: { width: window.innerWidth, height: window.innerHeight },
+      startUrl: this.startUrl ?? undefined,
     };
     return { meta, steps: this.steps.slice() };
   }
@@ -98,9 +101,15 @@ export class Recorder {
       selector,
       timestamp: Date.now(),
     };
-    this.steps.push(step);
+    this.pushStep(step);
     this.awaitAndRecordPredicate(target).catch(() => {});
   };
+
+  getRecentSteps(limit: number = 5): TracePayload["steps"] {
+    if (limit <= 0) return [];
+    const start = Math.max(0, this.steps.length - limit);
+    return this.steps.slice(start);
+  }
 
   private onDblClick = (ev: MouseEvent) => {
     if (!this.isRecording) return;
@@ -113,7 +122,7 @@ export class Recorder {
       selector,
       timestamp: Date.now(),
     };
-    this.steps.push(step);
+    this.pushStep(step);
     this.awaitAndRecordPredicate(target).catch(() => {});
   };
 
@@ -129,7 +138,7 @@ export class Recorder {
         selector,
         timestamp: Date.now(),
       };
-      this.steps.push(step);
+      this.pushStep(step);
       this.awaitAndRecordPredicate(target).catch(() => {});
     }
   };
@@ -153,7 +162,7 @@ export class Recorder {
       timestamp: Date.now(),
       redacted: isSensitive || undefined,
     };
-    this.steps.push(step);
+    this.pushStep(step);
     this.awaitAndRecordPredicate(target).catch(() => {});
   };
 
@@ -185,7 +194,7 @@ export class Recorder {
       selector,
       timestamp: Date.now(),
     };
-    this.steps.push(step);
+    this.pushStep(step);
     this.awaitAndRecordPredicate(el).catch(() => {});
   }
 
@@ -200,7 +209,7 @@ export class Recorder {
       selector,
       timestamp: Date.now(),
     };
-    this.steps.push(step);
+    this.pushStep(step);
     this.awaitAndRecordPredicate(rootEl).catch(() => {});
   };
 
@@ -303,8 +312,12 @@ export class Recorder {
     // Title observer
     const titleEl = document.querySelector("head > title");
     const titleMo = new MutationObserver(() => {
+      // Title changes indicate activity, but should NOT imply urlChanged
+      // unless the actual location.href changed relative to the baseline.
       markActivity();
-      if (document.title !== baselineTitle) flags.urlChanged = location.href !== baselineUrl || true; // prioritize title change as navigation-related
+      if (document.title !== baselineTitle && location.href !== baselineUrl) {
+        flags.urlChanged = true;
+      }
     });
     if (titleEl) titleMo.observe(titleEl, { childList: true, characterData: true, subtree: true });
 
@@ -349,7 +362,7 @@ export class Recorder {
       container: containerSel,
       timestamp: Date.now(),
     };
-    this.steps.push(predStep);
+    this.pushStep(predStep);
 
     // cleanup
     mo.disconnect();
@@ -378,6 +391,14 @@ export class Recorder {
 
   private sleep(ms: number) {
     return new Promise<void>((r) => setTimeout(r, ms));
+  }
+
+  private pushStep(step: ActionStep | WaitPredicateStep) {
+    // Default logical tab id stamping
+    if (typeof (step as any).tabLid === "undefined") {
+      (step as any).tabLid = 1;
+    }
+    this.steps.push(step);
   }
 
   private patchHistory() {
