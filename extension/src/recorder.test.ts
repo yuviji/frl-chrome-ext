@@ -109,6 +109,49 @@ describe('recorder actions and predicates', () => {
     expect(lastType.action.text).toBe('***')
     expect(lastType.redacted).toBe(true)
   })
+
+  it('records hover over menuitem and adds a hover action (predicate may follow async)', async () => {
+    document.body.innerHTML = ''
+    const menu = document.createElement('div')
+    const item = document.createElement('div')
+    item.setAttribute('role', 'menuitem')
+    item.textContent = 'More'
+    menu.appendChild(item)
+    document.body.appendChild(menu)
+
+    const recorder = createRecorder()
+    recorder.start()
+    const ev = new MouseEvent('mousemove', { bubbles: true, composed: true, clientX: 10, clientY: 10 })
+    item.dispatchEvent(ev)
+    await new Promise((r) => setTimeout(r, 180))
+    recorder.stop()
+    const dump = recorder.dump()
+    const last = dump.steps[dump.steps.length - 1] as any
+    expect(last.kind).toBe('action')
+    if (last.kind === 'action') expect(last.action.name).toBe('hover')
+  })
+
+  it('records highlight via mousedown/mouseup with selection', async () => {
+    document.body.innerHTML = ''
+    const p1 = document.createElement('p')
+    p1.textContent = 'Hello world'
+    document.body.appendChild(p1)
+    const range = document.createRange()
+    range.selectNodeContents(p1)
+    const sel = window.getSelection()!
+
+    const recorder = createRecorder()
+    recorder.start()
+    p1.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true, clientX: 0, clientY: 0 }))
+    sel.removeAllRanges()
+    sel.addRange(range)
+    p1.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true, clientX: 10, clientY: 10 }))
+    await new Promise((r) => setTimeout(r, 10))
+    recorder.stop()
+    const dump = recorder.dump()
+    const act = dump.steps.find((s: any) => s.kind === 'action' && s.action?.name === 'highlight') as any
+    expect(act).toBeTruthy()
+  })
 })
 
 

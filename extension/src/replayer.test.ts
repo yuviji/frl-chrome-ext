@@ -170,6 +170,67 @@ describe("CDPReplayer", () => {
     expect(evalCall).toBeTruthy();
   });
 
+  it("hovers by moving the mouse to element center", async () => {
+    const r = new CDPReplayer({ tabId: 1 });
+    await r.attach();
+    vi.spyOn(r as any, "eval").mockResolvedValue({ x: 50, y: 60 });
+
+    const step: ActionStep = {
+      kind: "action",
+      action: { name: "hover" },
+      selector: { selector: "#menuitem", strategy: "css", shadowChain: [], frameChain: [] },
+      timestamp: Date.now(),
+    };
+    await r.applyAction(step);
+    const moves = sendCalls.filter((c) => c.method === "Input.dispatchMouseEvent" && c.params?.type === "mouseMoved");
+    expect(moves.length).toBeGreaterThanOrEqual(1);
+    expect(moves[0].params.x).toBe(50);
+    expect(moves[0].params.y).toBe(60);
+  });
+
+  it("drags from start to end and releases", async () => {
+    const r = new CDPReplayer({ tabId: 1 });
+    await r.attach();
+    // First center for start, then for end
+    const evalSpy = vi.spyOn(r as any, "eval");
+    evalSpy.mockResolvedValueOnce({ x: 10, y: 20 });
+    evalSpy.mockResolvedValueOnce({ x: 110, y: 120 });
+
+    const step: ActionStep = {
+      kind: "action",
+      action: { name: "drag", toSelector: { selector: "#end", strategy: "css", shadowChain: [], frameChain: [] } },
+      selector: { selector: "#start", strategy: "css", shadowChain: [], frameChain: [] },
+      timestamp: Date.now(),
+    };
+    await r.applyAction(step);
+    const events = sendCalls.filter((c) => c.method === "Input.dispatchMouseEvent");
+    const pressed = events.find((e) => e.params?.type === "mousePressed");
+    const released = events.find((e) => e.params?.type === "mouseReleased");
+    expect(pressed).toBeTruthy();
+    expect(released).toBeTruthy();
+  });
+
+  it("highlights by simulating a drag selection", async () => {
+    const r = new CDPReplayer({ tabId: 1 });
+    await r.attach();
+    const evalSpy = vi.spyOn(r as any, "eval");
+    evalSpy.mockResolvedValueOnce({ x: 5, y: 6 });
+    evalSpy.mockResolvedValueOnce({ x: 105, y: 106 });
+
+    const step: ActionStep = {
+      kind: "action",
+      action: { name: "highlight", toSelector: { selector: "#end", strategy: "css", shadowChain: [], frameChain: [] }, text: "hello" },
+      selector: { selector: "#start", strategy: "css", shadowChain: [], frameChain: [] },
+      timestamp: Date.now(),
+    };
+    await r.applyAction(step);
+    const events = sendCalls.filter((c) => c.method === "Input.dispatchMouseEvent");
+    const pressed = events.find((e) => e.params?.type === "mousePressed");
+    const released = events.find((e) => e.params?.type === "mouseReleased");
+    expect(pressed).toBeTruthy();
+    expect(released).toBeTruthy();
+  });
+
   it("play() sleeps based on timestamp deltas (capped) and applies actions in order", async () => {
     const r = new CDPReplayer({ tabId: 1 });
     await r.attach();

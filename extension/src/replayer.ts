@@ -102,6 +102,17 @@ export class CDPReplayer {
         this.lastActionTs = Date.now();
         break;
       }
+      case "hover": {
+        const center = await this.resolveElementViewportCenter(step.selector);
+        if (!center) throw new Error("Element not found for hover");
+        await this.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: center.x, y: center.y, pointerType: "mouse" });
+        // Small dwell to allow hover-driven menus to render
+        await this.sleep(120);
+        this.lastActionName = action.name;
+        this.lastActionSelectorRaw = step.selector?.selector;
+        this.lastActionTs = Date.now();
+        break;
+      }
       case "type": {
         const center = await this.resolveElementViewportCenter(step.selector);
         if (!center) throw new Error("Element not found for type");
@@ -157,6 +168,42 @@ export class CDPReplayer {
           returnByValue: true,
           awaitPromise: true,
         });
+        this.lastActionName = action.name;
+        this.lastActionSelectorRaw = step.selector?.selector;
+        this.lastActionTs = Date.now();
+        break;
+      }
+      case "drag": {
+        const start = await this.resolveElementViewportCenter(step.selector);
+        const end = action.toSelector ? await this.resolveElementViewportCenter(action.toSelector) : (action.toX != null && action.toY != null ? { x: Math.round(action.toX), y: Math.round(action.toY) } : null);
+        if (!start || !end) throw new Error("Drag endpoints not found");
+        await this.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: start.x, y: start.y, pointerType: "mouse" });
+        await this.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x: start.x, y: start.y, button: "left", clickCount: 1, pointerType: "mouse" });
+        // simple linear interpolation in a few steps
+        const steps = 6;
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const x = Math.round(start.x + (end.x - start.x) * t);
+          const y = Math.round(start.y + (end.y - start.y) * t);
+          await this.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, pointerType: "mouse" });
+          await this.sleep(16);
+        }
+        await this.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x: end.x, y: end.y, button: "left", clickCount: 1, pointerType: "mouse" });
+        this.lastActionName = action.name;
+        this.lastActionSelectorRaw = step.selector?.selector;
+        this.lastActionTs = Date.now();
+        break;
+      }
+      case "highlight": {
+        // Highlight is effectively a drag selection; we reuse drag
+        const endSel = action.toSelector;
+        const endPt = endSel ? await this.resolveElementViewportCenter(endSel) : (action.toX != null && action.toY != null ? { x: Math.round(action.toX), y: Math.round(action.toY) } : null);
+        const start = await this.resolveElementViewportCenter(step.selector);
+        if (!start || !endPt) throw new Error("Highlight endpoints not found");
+        await this.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: start.x, y: start.y, pointerType: "mouse" });
+        await this.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x: start.x, y: start.y, button: "left", clickCount: 1, pointerType: "mouse" });
+        await this.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: endPt.x, y: endPt.y, pointerType: "mouse" });
+        await this.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x: endPt.x, y: endPt.y, button: "left", clickCount: 1, pointerType: "mouse" });
         this.lastActionName = action.name;
         this.lastActionSelectorRaw = step.selector?.selector;
         this.lastActionTs = Date.now();
@@ -329,7 +376,13 @@ export class CDPReplayer {
   private async resolveElementViewportCenter(
     selector: import("./types").BuiltSelector
   ): Promise<{ x: number; y: number } | null> {
-    const raw = this.translateAriaPseudo(selector?.selector ?? "") || (selector?.selector ?? "");
+    const original = selector?.selector ?? "";
+    const isAriaPseudo = /(^|\s)role\s*=/.test(original) && /(^|\s)name(~|)?\s*=/.test(original);
+    if (isAriaPseudo) {
+      const center = await this.resolveAriaPseudoCenter(original);
+      if (center) return center;
+    }
+    const raw = this.translateAriaPseudo(original) || original;
     const expr = `(() => {\n` +
       `  const raw = ${JSON.stringify(raw)};\n` +
       `  function byXPath(path) {\n` +
@@ -356,6 +409,37 @@ export class CDPReplayer {
     } catch {
       return null;
     }
+  }
+
+  private async resolveAriaPseudoCenter(raw: string): Promise<{ x: number; y: number } | null> {
+    const fn = `function(sel){
+      function parse(s){
+        try {
+          var mRole = s.match(/(?:^|\s)role=([^\s]+)/);
+          var mContains = s.match(/(?:^|\s)name~=([\s\S]+)/);
+          var mExact = mContains ? null : s.match(/(?:^|\s)name=([\s\S]+)/);
+          var role = mRole ? mRole[1] : '';
+          var name = (mContains ? mContains[1] : (mExact ? mExact[1] : '')).trim();
+          var contains = !!mContains;
+          return { role: role, name: name, contains: contains };
+        } catch(e){ return { role:'', name:'', contains:false }; }
+      }
+      function visible(n){ try { var r=n.getBoundingClientRect(); if (!r || r.width<=0 || r.height<=0) return false; var cs=getComputedStyle(n); return cs && cs.visibility!=='hidden' && cs.display!=='none'; } catch(e){ return true; } }
+      function accName(n){ try { var a=n.getAttribute('aria-label'); if (a && a.trim()) return a.trim(); var t=(n.textContent||'').replace(/\s+/g,' ').trim(); return t; } catch(e){ return ''; } }
+      var p = parse(sel); if (!p.role || !p.name) return null;
+      var nodes = Array.from(document.querySelectorAll('[role="'+p.role+'"]'));
+      for (var i=0;i<nodes.length;i++) {
+        var n = nodes[i]; var nm = accName(n);
+        if ((p.contains && nm.indexOf(p.name) >= 0) || (!p.contains && nm === p.name)) {
+          if (!visible(n)) continue;
+          try { n.scrollIntoView({ block: 'center', inline: 'center' }); } catch(e){}
+          var r = n.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) };
+        }
+      }
+      return null;
+    }`;
+    try { return await this.callFunctionOn(fn, [raw]); } catch { return null; }
   }
 
   // Wait for a recorded predicate to be satisfied on the page without fixed sleeps

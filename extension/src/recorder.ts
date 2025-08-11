@@ -30,6 +30,9 @@ export class Recorder {
   private lastActivityTs = Date.now();
   private scrollBuffer: { el: Element; dx: number; dy: number } | null = null;
   private scrollFlushTimer: number | undefined;
+  private hoverBuffer: { el: Element; lastTs: number } | null = null;
+  private hoverFlushTimer: number | undefined;
+  private dragState: { startEl: Element; startX: number; startY: number; active: boolean } | null = null;
   private initializedHistoryPatch = false;
   private startUrl: string | null = null;
 
@@ -65,6 +68,9 @@ export class Recorder {
     window.addEventListener("keydown", this.onKeydown, true);
     window.addEventListener("input", this.onInput as EventListener, true);
     window.addEventListener("wheel", this.onWheel, { capture: true, passive: true } as any);
+    window.addEventListener("mousemove", this.onMouseMove, { capture: true, passive: true } as any);
+    window.addEventListener("mousedown", this.onMouseDown, true);
+    window.addEventListener("mouseup", this.onMouseUp, true);
     window.addEventListener("scroll", this.onAnyActivity, true);
     window.addEventListener("resize", this.onAnyActivity, true);
     this.patchHistory();
@@ -79,6 +85,9 @@ export class Recorder {
     window.removeEventListener("keydown", this.onKeydown, true);
     window.removeEventListener("input", this.onInput as EventListener, true);
     window.removeEventListener("wheel", this.onWheel as EventListener, true);
+    window.removeEventListener("mousemove", this.onMouseMove as EventListener, true);
+    window.removeEventListener("mousedown", this.onMouseDown as EventListener, true);
+    window.removeEventListener("mouseup", this.onMouseUp as EventListener, true);
     window.removeEventListener("scroll", this.onAnyActivity, true);
     window.removeEventListener("resize", this.onAnyActivity, true);
     window.removeEventListener("popstate", this.onLocationChange, true);
@@ -186,6 +195,118 @@ export class Recorder {
     if (this.scrollFlushTimer) clearTimeout(this.scrollFlushTimer);
     this.scrollFlushTimer = setTimeout(() => this.flushScrollBuffer(), 120) as unknown as number;
   };
+
+  private onMouseMove = (ev: MouseEvent) => {
+    if (!this.isRecording) return;
+    const target = this.getEventTargetElement(ev);
+    if (!target) return;
+    // Track drag selection path as highlight
+    if (this.dragState && this.dragState.active) {
+      // We do not emit on every move; the final mouseup will generate a highlight step
+    }
+    const el = target;
+    const now = Date.now();
+    // Only record hovers over menu/listbox/menuitem/option-ish targets to avoid noise
+    if (!this.isMenuish(el)) return;
+    // Throttle to avoid floods
+    if (this.hoverBuffer && this.hoverBuffer.el === el && now - this.hoverBuffer.lastTs < 150) {
+      this.hoverBuffer.lastTs = now;
+      return;
+    }
+    this.hoverBuffer = { el, lastTs: now };
+    if (this.hoverFlushTimer) clearTimeout(this.hoverFlushTimer);
+    this.hoverFlushTimer = setTimeout(() => this.flushHoverBuffer(), 120) as unknown as number;
+  };
+
+  private isMenuish(el: Element): boolean {
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    const tag = el.tagName.toLowerCase();
+    if (role.includes("menuitem") || role.includes("option") || role === "menu" || role === "listbox") return true;
+    if (tag === "option" || tag === "li") return true;
+    if (el.closest('[role="menu"], [role="listbox"], ul[role], ol[role]')) return true;
+    return false;
+  }
+
+  private flushHoverBuffer() {
+    if (!this.hoverBuffer) return;
+    const { el } = this.hoverBuffer;
+    this.hoverBuffer = null;
+    const selector = buildSelector(el);
+    const step: ActionStep = {
+      kind: "action",
+      action: { name: "hover" },
+      selector,
+      timestamp: Date.now(),
+    };
+    this.pushStep(step);
+    // If this hover is over a menu trigger or menu item, record a follow-up wait to capture submenu reveal
+    try {
+      const hasPopup = (el.getAttribute("aria-haspopup") || "").toLowerCase().includes("menu");
+      if (hasPopup || this.isMenuish(el)) {
+        this.awaitAndRecordPredicate(el).catch(() => {});
+      }
+    } catch {}
+  }
+
+  private onMouseDown = (ev: MouseEvent) => {
+    if (!this.isRecording) return;
+    const target = this.getEventTargetElement(ev);
+    if (!target) return;
+    this.dragState = { startEl: target, startX: ev.clientX, startY: ev.clientY, active: true };
+  };
+
+  private onMouseUp = (ev: MouseEvent) => {
+    if (!this.isRecording) return;
+    if (!this.dragState || !this.dragState.active) return;
+    this.dragState.active = false;
+    const start = this.dragState;
+    const endTarget = this.getEventTargetElement(ev) || document.elementFromPoint(ev.clientX, ev.clientY) || start.startEl;
+    const endEl = endTarget as Element;
+    const isSelection = this.hasUserSelection();
+    if (isSelection) {
+      const startSel = buildSelector(start.startEl);
+      const endSel = buildSelector(endEl);
+      const step: ActionStep = {
+        kind: "action",
+        action: { name: "highlight", toSelector: endSel, toX: ev.clientX, toY: ev.clientY, text: this.getSelectedTextSafe() },
+        selector: startSel,
+        timestamp: Date.now(),
+      };
+      this.pushStep(step);
+      // selection usually implies text change/layout; record wait
+      this.awaitAndRecordPredicate(endEl).catch(() => {});
+    } else {
+      // Treat as drag
+      const startSel = buildSelector(start.startEl);
+      const endSel = buildSelector(endEl);
+      const step: ActionStep = {
+        kind: "action",
+        action: { name: "drag", toSelector: endSel, toX: ev.clientX, toY: ev.clientY },
+        selector: startSel,
+        timestamp: Date.now(),
+      };
+      this.pushStep(step);
+      this.awaitAndRecordPredicate(endEl).catch(() => {});
+    }
+  };
+
+  private hasUserSelection(): boolean {
+    try {
+      const sel = window.getSelection();
+      return !!sel && !sel.isCollapsed && String(sel.toString()).trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private getSelectedTextSafe(): string | undefined {
+    try {
+      const t = String(window.getSelection()?.toString() || "").trim();
+      return t || undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   private flushScrollBuffer() {
     if (!this.scrollBuffer) return;

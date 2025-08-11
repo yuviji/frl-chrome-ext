@@ -26,9 +26,12 @@ export interface BuiltSelector {
 export type ActionKind =
   | { name: "click" }
   | { name: "dblclick" }
+  | { name: "hover" }
   | { name: "type"; text: string }
   | { name: "press"; key: "Enter" }
   | { name: "scroll"; deltaX: number; deltaY: number }
+  | { name: "drag"; toSelector?: BuiltSelector; toX?: number; toY?: number }
+  | { name: "highlight"; toSelector?: BuiltSelector; toX?: number; toY?: number; text?: string }
   | { name: "navigate"; url: string; title?: string };
 
 export type PredicateName =

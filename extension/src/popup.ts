@@ -73,9 +73,12 @@ function renderPreview(steps: any[]) {
     if (s.kind === "action") {
       const nm = s.action?.name;
       if (nm === "click" || nm === "dblclick") return `${nm} ${pickNiceSelector(s.selector)}`;
+      if (nm === "hover") return `hover ${pickNiceSelector(s.selector)}`;
       if (nm === "type") return `type "${s.redacted ? "***" : truncate(String(s.action?.text ?? ""), 40)}" into ${pickNiceSelector(s.selector)}`;
       if (nm === "press") return `press ${s.action?.key}`;
       if (nm === "scroll") return `scroll`;
+      if (nm === "drag") return `drag ${pickNiceSelector(s.selector)} → ${pickNiceSelector(s.action?.toSelector) || (typeof s.action?.toX === 'number' ? `(${s.action.toX},${s.action.toY})` : '')}`;
+      if (nm === "highlight") return `highlight ${pickNiceSelector(s.selector)} → ${pickNiceSelector(s.action?.toSelector) || (typeof s.action?.toX === 'number' ? `(${s.action.toX},${s.action.toY})` : '')}`;
       if (nm === "navigate") return `navigate to ${shortUrl(String(s.action?.url || ""))}`;
       return nm || "action";
     }
