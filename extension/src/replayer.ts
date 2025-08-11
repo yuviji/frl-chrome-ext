@@ -47,7 +47,9 @@ export class CDPReplayer {
       await this.attach();
     }
     let previousTs: number | undefined;
-    for (const step of steps) {
+    for (let idx = 0; idx < steps.length; idx += 1) {
+      const step = steps[idx];
+      this.logReplayStepStart(step, idx, steps.length);
       if (previousTs != null) {
         const rawDelta = Math.max(0, step.timestamp - previousTs);
         const maxThinkMs = 1500;
@@ -60,6 +62,7 @@ export class CDPReplayer {
         } else if ((step as any).kind === "waitForPredicate") {
           await this.waitPredicate(step as import("./types").WaitPredicateStep);
         }
+        this.logReplayStepEnd(step, idx, steps.length);
       } catch (err) {
         const message = this.formatStepError(step, err);
         // For action errors: log and continue. For wait errors: stop playback with friendly message.
@@ -376,13 +379,17 @@ export class CDPReplayer {
         break;
       }
       case "domAdded": {
-        const countExpr = this.buildDomCountExpr(step.container);
-        const baseline = await this.eval<number>(countExpr);
+        // If container is a contenteditable editor (e.g., ProseMirror input), DOM additions
+        // typically occur elsewhere in the page (the transcript), so skip this wait.
+        if (await this.isContentEditableContainer(step.container)) {
+          console.warn(`[FRL] skip domAdded for contenteditable container: ${step.container?.selector || ''}`);
+          break;
+        }
         try {
-          await this.waitUntil(async () => {
-            const cur = await this.eval<number>(countExpr);
-            return Number(cur) > Number(baseline);
-          }, timeoutMs, pollMs);
+          const ok = await this.waitForDomAddedObserver(step.container, timeoutMs);
+          if (!ok) {
+            throw new Error("domAdded timeout");
+          }
         } catch (e) {
           throw new Error(this.friendlyWaitTimeoutMessage(step, timeoutMs));
         }
@@ -662,6 +669,47 @@ export class CDPReplayer {
     return await this.callFunctionOn<boolean>(fn, [selector, timeoutMs, idleMs]);
   }
 
+  private async waitForDomAddedObserver(
+    container: import("./types").BuiltSelector | undefined,
+    timeoutMs: number
+  ): Promise<boolean> {
+    const selector = container?.selector ?? "";
+    const fn = `function(selector, timeoutMs){
+      return new Promise(function(resolve){
+        var start = Date.now();
+        function byXPath(path){ try{ var r=document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); return r.singleNodeValue; }catch(e){ return null; } }
+        function byQuery(q){ try{ return document.querySelector(q); }catch(e){ return null; } }
+        var el = null; if (selector && (/^\\//.test(selector) || selector.charAt(0)==='(')) { el = byXPath(selector); }
+        if (!el) el = byQuery(selector);
+        if (!el || el.nodeType !== 1) el = document.body || document.documentElement;
+        // If the element is a contenteditable/editor, use the document root as the scope for DOM additions
+        try { if ((el as any).isContentEditable === true || (el.getAttribute && el.getAttribute('contenteditable'))) { el = document.documentElement; } } catch(e) {}
+        function hasAddedElement(m){ try{ if (!m) return false; if (m.addedNodes && m.addedNodes.length){ for (var i=0;i<m.addedNodes.length;i++){ var n=m.addedNodes[i]; if (n && n.nodeType === 1) return true; } } return false; }catch(e){ return false; } }
+        function textOf(node){ try{ return String((node.textContent||'')).trim(); }catch(e){ return ''; } }
+        function htmlOf(node){ try{ return String(node.innerHTML||''); }catch(e){ return ''; } }
+        var baselineCount = 0; var baselineText = ''; var baselineHtml = '';
+        try { baselineCount = (el.querySelectorAll && el.querySelectorAll('*').length) || 0; } catch(e) { baselineCount = 0; }
+        baselineText = textOf(el); baselineHtml = htmlOf(el);
+        var obs = new MutationObserver(function(muts){
+          for (var i=0;i<muts.length;i++) {
+            if (hasAddedElement(muts[i])) { try{ obs.disconnect(); }catch(e){} resolve(true); return; }
+          }
+          var curText = textOf(el); var curHtml = htmlOf(el);
+          if (curText !== baselineText || curHtml !== baselineHtml) { try{ obs.disconnect(); }catch(e){} resolve(true); return; }
+        });
+        try { obs.observe(el, { subtree:true, childList:true, characterData:true, attributes:true }); } catch(e) {}
+        var iv = setInterval(function(){
+          var cur = 0; try { cur = (el.querySelectorAll && el.querySelectorAll('*').length) || 0; } catch(e) { cur = 0; }
+          if (cur > baselineCount) { clearInterval(iv); try{ obs.disconnect(); }catch(e){} resolve(true); return; }
+          var curText = textOf(el); var curHtml = htmlOf(el);
+          if (curText !== baselineText || curHtml !== baselineHtml) { clearInterval(iv); try{ obs.disconnect(); }catch(e){} resolve(true); return; }
+          if ((Date.now()-start) > timeoutMs) { clearInterval(iv); try{ obs.disconnect(); }catch(e){} resolve(false); }
+        }, 120);
+      });
+    }`;
+    return await this.callFunctionOn<boolean>(fn, [selector, timeoutMs]);
+  }
+
   // --- helpers for friendly messages & validation ---
   private friendlyPredicateName(pred: string): string {
     switch (pred) {
@@ -689,10 +737,10 @@ export class CDPReplayer {
   private warnIfMalformedContainer(container?: import("./types").BuiltSelector): void {
     const raw = container?.selector ?? "";
     if (!raw) return;
-    // Our replayer only supports CSS selectors or XPath-like paths. ARIA pseudo-selectors are not supported.
-    const looksLikeXPath = /^\//.test(raw) || raw.startsWith("(");
-    const looksLikeAriaPseudo = /\brole\s*=|\bname\s*=/.test(raw);
-    if (!looksLikeXPath && looksLikeAriaPseudo && !this.translateAriaPseudo(raw)) {
+    // Warn only for pseudo syntax we translate (role=..., name=...), not for valid CSS like [role="presentation"]
+    const isPseudo = /(?:^|\s)role\s*=|(?:^|\s)name(?:~)?\s*=/.test(raw);
+    const translated = this.translateAriaPseudo(raw);
+    if (isPseudo && !translated) {
       console.error(`[FRL] Malformed/unsupported container selector for replay: ${raw}. Falling back to document root.`);
     }
   }
@@ -732,6 +780,64 @@ export class CDPReplayer {
     } catch {
       return null;
     }
+  }
+
+  private logReplayStepStart(step: any, index: number, total: number): void {
+    try {
+      if (!step || typeof step !== "object") return;
+      const prefix = `[FRL][replay] ${index + 1}/${total}`;
+      if (step.kind === "action") {
+        const nm = step.action?.name;
+        const sel = this.prettySelector(step.selector);
+        // eslint-disable-next-line no-console
+        console.log(`${prefix} action: ${nm}${sel ? ` → ${sel}` : ""}`);
+      } else if (step.kind === "waitForPredicate") {
+        const pred = step.predicate;
+        const where = this.prettySelector(step.container);
+        // eslint-disable-next-line no-console
+        console.log(`${prefix} wait: ${this.friendlyPredicateName(String(pred))}${where ? ` in ${where}` : ""}`);
+      }
+    } catch {}
+  }
+
+  private logReplayStepEnd(step: any, index: number, total: number): void {
+    try {
+      const prefix = `[FRL][replay] ${index + 1}/${total}`;
+      // eslint-disable-next-line no-console
+      console.log(`${prefix} ✓ done`);
+    } catch {}
+  }
+
+  private prettySelector(sel?: import("./types").BuiltSelector): string {
+    try {
+      if (!sel) return "";
+      const text = (sel as any).textHint as string | undefined;
+      const role = (sel as any).roleHint as string | undefined;
+      if (text && role) return `${role} “${this.truncate(text, 60)}”`;
+      if (text) return `“${this.truncate(text, 60)}”`;
+      if (role) return role;
+      const raw = String((sel as any).selector ?? "");
+      return raw.length > 120 ? raw.slice(0, 117) + "…" : raw;
+    } catch { return ""; }
+  }
+
+  private truncate(text: string, max = 120): string {
+    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  }
+
+  private async isContentEditableContainer(container?: import("./types").BuiltSelector): Promise<boolean> {
+    const selector = container?.selector ?? "";
+    const fn = `function(selector){
+      function byXPath(path){ try{ var r=document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); return r.singleNodeValue; }catch(e){ return null; } }
+      function byQuery(q){ try{ return document.querySelector(q); }catch(e){ return null; } }
+      var el = null; if (selector && (/^\\//.test(selector) || selector.charAt(0)==='(')) { el = byXPath(selector); }
+      if (!el) el = byQuery(selector);
+      if (!el || el.nodeType !== 1) return false;
+      try { if ((el as any).isContentEditable === true) return true; } catch(e) {}
+      try { var ce = el.getAttribute && el.getAttribute('contenteditable'); if (ce && ce !== 'false') return true; } catch(e) {}
+      return false;
+    }`;
+    try { return await this.callFunctionOn<boolean>(fn, [selector]); } catch { return false; }
   }
 }
 

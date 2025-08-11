@@ -162,9 +162,9 @@ function buildCompactCssSelector(el: Element, root: Document | ShadowRoot): stri
 // (XPath generation removed)
 
 function cssPart(node: Element): string {
-  // If element has id, prefer #id
+  // If element has a stable-looking id, prefer #id
   const id = node.getAttribute("id");
-  if (id && isIdSafe(id)) return `#${cssEsc(id)}`;
+  if (id && isIdStable(id)) return `#${cssEsc(id)}`;
 
   // Prefer class if single, short, and unique among siblings of same tag
   const className = pickStableClass(node);
@@ -173,6 +173,10 @@ function cssPart(node: Element): string {
   if (className) {
     return `${tag}.${className}`;
   }
+
+  // Try a stable attribute-based selector before nth-of-type
+  const stableAttr = buildStableAttributeSelector(node);
+  if (stableAttr) return stableAttr;
 
   // Fallback to nth-of-type for compactness
   const index = nthOfTypeIndex(node);
@@ -204,8 +208,51 @@ function pickStableClass(node: Element): string | null {
   return null;
 }
 
-function isIdSafe(id: string): boolean {
-  return !/\s/.test(id) && id.length <= 40;
+function isIdStable(id: string): boolean {
+  if (typeof id !== 'string') return false;
+  const trimmed = id.trim();
+  if (!trimmed) return false;
+  if (trimmed.length > 40) return false;
+  // Allow only alphanumerics, dash and underscore
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(trimmed)) return false;
+  // Reject if contains long digit or hex-like runs (e.g., 3+ in a row)
+  if (/(?:[0-9]{3,}|[A-Fa-f0-9]{5,})/.test(trimmed)) return false;
+  // Reject if looks like multiple random-ish segments joined by -/_ (e.g., foo-1a2b3c-9d8e7f)
+  if (/(?:^|[-_])[A-Za-z0-9]{4,}(?:[-_][A-Za-z0-9]{4,}){2,}$/.test(trimmed)) return false;
+  // Digit density heuristic: if more than ~35% digits, likely unstable
+  const digitCount = (trimmed.match(/[0-9]/g) || []).length;
+  if (digitCount / trimmed.length > 0.35) return false;
+  return true;
+}
+
+function buildStableAttributeSelector(node: Element): string | null {
+  const tag = node.tagName.toLowerCase();
+  const parts: string[] = [tag];
+  const add = (attr: string) => {
+    const raw = node.getAttribute(attr);
+    if (!raw) return;
+    const val = raw.trim();
+    if (!val) return;
+    // Avoid dynamic-looking values
+    if (val.length > 40) return;
+    if (/(?:[0-9]{3,}|[A-Fa-f0-9]{5,})/.test(val)) return;
+    if (/[«»]/.test(val)) return;
+    parts.push(`[${attr}="${cssEsc(val)}"]`);
+  };
+
+  // Prefer stable attributes; avoid stateful ones like aria-expanded/data-state
+  add('data-testid');
+  add('data-test');
+  add('data-qa');
+  add('type');
+  add('aria-label');
+  add('aria-haspopup');
+  // If role attribute present and short, include it
+  add('role');
+
+  // If only tag with no attributes, return null
+  if (parts.length <= 1) return null;
+  return parts.join('');
 }
 
 function cssEsc(value: string): string {
