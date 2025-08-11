@@ -94,6 +94,7 @@ export class Recorder {
     if (!this.isRecording) return;
     const target = this.getEventTargetElement(ev);
     if (!target) return;
+    this.logInteraction("click", target);
     const selector = buildSelector(target);
     const step: ActionStep = {
       kind: "action",
@@ -115,6 +116,7 @@ export class Recorder {
     if (!this.isRecording) return;
     const target = this.getEventTargetElement(ev);
     if (!target) return;
+    this.logInteraction("dblclick", target);
     const selector = buildSelector(target);
     const step: ActionStep = {
       kind: "action",
@@ -131,6 +133,7 @@ export class Recorder {
     const target = (ev.target as Element) || null;
     if (!target || !(target instanceof Element)) return;
     if (ev.key === "Enter") {
+      this.logInteraction("press:Enter", target);
       const selector = buildSelector(target);
       const step: ActionStep = {
         kind: "action",
@@ -154,6 +157,7 @@ export class Recorder {
     // Redaction for sensitive inputs
     const { isSensitive } = this.detectSensitivity(target);
     const recordedText = isSensitive ? "***" : text;
+    this.logInteraction("type", target, recordedText);
     const selector = buildSelector(target);
     const step: ActionStep = {
       kind: "action",
@@ -187,6 +191,7 @@ export class Recorder {
     if (!this.scrollBuffer) return;
     const { el, dx, dy } = this.scrollBuffer;
     this.scrollBuffer = null;
+    this.logInteraction("scroll", el, `${Math.trunc(dx)},${Math.trunc(dy)}`);
     const selector = buildSelector(el);
     const step: ActionStep = {
       kind: "action",
@@ -217,7 +222,62 @@ export class Recorder {
     const path = (ev as any).composedPath ? (ev as any).composedPath() : [];
     const target = (path[0] as Element) || (ev.target as Element | null);
     if (!target || !(target instanceof Element)) return null;
-    return target;
+    return this.normalizeTargetElement(target);
+  }
+
+  private normalizeTargetElement(el: Element): Element {
+    // If target is inside SVG, prefer the nearest non-SVG accessible ancestor
+    const isSvg = (node: Element | null) => !!node && (node instanceof (globalThis as any).SVGElement || String(node.namespaceURI || '').toLowerCase().includes('svg'));
+    const isInteractiveTag = (node: Element) => {
+      const tag = node.tagName.toLowerCase();
+      if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'summary' || tag === 'label') return true;
+      const role = (node.getAttribute('role') || '').toLowerCase();
+      if (role && role !== 'presentation' && role !== 'none') return true;
+      const tabIndexAttr = node.getAttribute('tabindex');
+      const tabIndex = tabIndexAttr != null ? parseInt(tabIndexAttr, 10) : NaN;
+      const contentEditable = (node as HTMLElement).isContentEditable === true;
+      return contentEditable || (Number.isFinite(tabIndex) && tabIndex >= 0);
+    };
+    // First, lift out of any SVG subtree to closest non-SVG element
+    let node: Element | null = el;
+    while (node && isSvg(node)) {
+      node = node.parentElement;
+    }
+    if (!node) return el;
+    // Then climb to nearest accessible ancestor if available
+    let cur: Element | null = node;
+    while (cur && cur !== document.body) {
+      if (isInteractiveTag(cur) || cur.hasAttribute('data-testid') || cur.hasAttribute('data-test') || cur.hasAttribute('data-qa') || cur.id) {
+        return cur;
+      }
+      cur = cur.parentElement;
+    }
+    return node;
+  }
+
+  private logInteraction(kind: string, el: Element, note?: string) {
+    try {
+      const snap = this.elementSnapshot(el);
+      // eslint-disable-next-line no-console
+      console.log("[FRL][record]", { kind, note, element: snap });
+    } catch {}
+  }
+
+  private elementSnapshot(el: Element): string {
+    try {
+      const outer = (el as HTMLElement).outerHTML || "";
+      if (outer) return outer.length > 800 ? outer.slice(0, 800) + "…" : outer;
+    } catch {}
+    try {
+      const tag = el.tagName.toLowerCase();
+      const id = (el as HTMLElement).id ? `#${(el as HTMLElement).id}` : "";
+      const cls = (el as HTMLElement).className ? `.${String((el as HTMLElement).className).trim().split(/\s+/).join('.')}` : "";
+      const role = el.getAttribute("role");
+      const aria = el.getAttribute("aria-label");
+      const testid = el.getAttribute("data-testid");
+      return `<${tag}${id}${cls}${role ? ` role=\"${role}\"` : ""}${aria ? ` aria-label=\"${aria}\"` : ""}${testid ? ` data-testid=\"${testid}\"` : ""}>`;
+    } catch {}
+    return String(el);
   }
 
   private detectSensitivity(target: Element): { isSensitive: boolean } {

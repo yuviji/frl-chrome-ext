@@ -44,6 +44,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // If an old replayer exists for this tab, stop and dispose it first
         const existing = tabReplayers.get(tabId);
         if (existing) {
+          // Prevent concurrent play requests by reusing the existing playing promise if present
+          if (existing.playing) {
+            console.log(`[FRL] play already in progress for tab=${tabId}; awaiting existing session`);
+            await existing.playing;
+            sendResponse({ ok: true });
+            return;
+          }
           try { await existing.replayer.detach(); } catch {}
           tabReplayers.delete(tabId);
         }

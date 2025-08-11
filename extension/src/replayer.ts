@@ -9,6 +9,9 @@ export class CDPReplayer {
   private readonly debuggee: Debuggee;
   private isAttached: boolean = false;
   private inflightRequests: number = 0;
+  private lastActionName?: string;
+  private lastActionSelectorRaw?: string;
+  private lastActionTs?: number;
   private boundOnEvent?: (
     source: Debuggee,
     method: string,
@@ -74,10 +77,16 @@ export class CDPReplayer {
 
   async applyAction(step: import("./types").ActionStep): Promise<void> {
     const action = step.action;
+    const prevName = this.lastActionName;
+    const prevSel = this.lastActionSelectorRaw;
+    const prevTs = this.lastActionTs ?? 0;
     switch (action.name) {
       case "navigate": {
         await this.sendCommand("Page.navigate", { url: action.url });
         await this.waitForDomReady();
+        this.lastActionName = action.name;
+        this.lastActionSelectorRaw = step.selector?.selector;
+        this.lastActionTs = Date.now();
         break;
       }
       case "click":
@@ -85,16 +94,30 @@ export class CDPReplayer {
         const center = await this.resolveElementViewportCenter(step.selector);
         if (!center) throw new Error("Element not found for click");
         await this.mouseClick(center.x, center.y, action.name === "dblclick" ? 2 : 1);
+        this.lastActionName = action.name;
+        this.lastActionSelectorRaw = step.selector?.selector;
+        this.lastActionTs = Date.now();
         break;
       }
       case "type": {
         const center = await this.resolveElementViewportCenter(step.selector);
         if (!center) throw new Error("Element not found for type");
-        // Click to focus first
-        await this.mouseClick(center.x, center.y, 1);
+        // Focus only if not part of a rapid contiguous type/click sequence on the same element
+        let shouldFocus = true;
+        const sameTarget = prevSel && prevSel === step.selector?.selector;
+        const recent = Date.now() - prevTs < 2000;
+        if (sameTarget && recent && (prevName === "type" || prevName === "click")) {
+          shouldFocus = false;
+        }
+        if (shouldFocus) {
+          await this.mouseClick(center.x, center.y, 1);
+        }
         if (!step.redacted && typeof action.text === "string" && action.text.length > 0) {
           await this.sendCommand("Input.insertText", { text: action.text });
         }
+        this.lastActionName = action.name;
+        this.lastActionSelectorRaw = step.selector?.selector;
+        this.lastActionTs = Date.now();
         break;
       }
       case "press": {
@@ -118,6 +141,9 @@ export class CDPReplayer {
             unmodifiedText: "\r",
           });
         }
+        this.lastActionName = action.name;
+        this.lastActionSelectorRaw = step.selector?.selector;
+        this.lastActionTs = Date.now();
         break;
       }
       case "scroll": {
@@ -128,6 +154,9 @@ export class CDPReplayer {
           returnByValue: true,
           awaitPromise: true,
         });
+        this.lastActionName = action.name;
+        this.lastActionSelectorRaw = step.selector?.selector;
+        this.lastActionTs = Date.now();
         break;
       }
       default:
@@ -139,7 +168,7 @@ export class CDPReplayer {
   async eval<T>(expression: string): Promise<T> {
     const result = await this.sendCommand<{
       result: { type: string; value?: T };
-      exceptionDetails?: unknown;
+      exceptionDetails?: { text?: string; exception?: { description?: string; value?: any } };
     }>("Runtime.evaluate", {
       expression,
       returnByValue: true,
@@ -147,7 +176,9 @@ export class CDPReplayer {
     });
     // Basic exception surface if present
     if ((result as any)?.exceptionDetails) {
-      throw new Error("Runtime.evaluate exception");
+      const details = (result as any).exceptionDetails;
+      const msg = details?.exception?.description || details?.text || "Runtime.evaluate exception";
+      throw new Error(msg);
     }
     return (result as any)?.result?.value as T;
   }
@@ -295,7 +326,7 @@ export class CDPReplayer {
   private async resolveElementViewportCenter(
     selector: import("./types").BuiltSelector
   ): Promise<{ x: number; y: number } | null> {
-    const raw = selector?.selector ?? "";
+    const raw = this.translateAriaPseudo(selector?.selector ?? "") || (selector?.selector ?? "");
     const expr = `(() => {\n` +
       `  const raw = ${JSON.stringify(raw)};\n` +
       `  function byXPath(path) {\n` +
@@ -358,14 +389,22 @@ export class CDPReplayer {
         break;
       }
       case "textChanged": {
-        const hashExpr = this.buildInnerTextHashExpr(step.container);
-        const baseline = await this.eval<number>(hashExpr);
+        // If the last action was a direct type into the same container, the change likely already
+        // occurred synchronously when we dispatched Input.insertText. Consider it satisfied.
+        const containerSel = step.container?.selector || "";
+        if (this.lastActionName === "type" && containerSel && containerSel === this.lastActionSelectorRaw) {
+          return;
+        }
         try {
-          await this.waitUntil(async () => {
-            const cur = await this.eval<number>(hashExpr);
-            return Number(cur) !== Number(baseline);
-          }, timeoutMs, pollMs);
+          const ok = await this.waitForTextChangeObserver(step.container, timeoutMs);
+          if (!ok?.changed) {
+            const textPreview = (ok?.currentText || "").slice(0, 160);
+            const htmlPreview = (ok?.currentHtml || "").slice(0, 160);
+            const baseMsg = this.friendlyWaitTimeoutMessage(step, timeoutMs);
+            throw new Error(`${baseMsg}. Current text: ${JSON.stringify(textPreview)}${htmlPreview ? `, html: ${JSON.stringify(htmlPreview)}` : ""}`);
+          }
         } catch (e) {
+          if (e instanceof Error) throw e;
           throw new Error(this.friendlyWaitTimeoutMessage(step, timeoutMs));
         }
         break;
@@ -383,24 +422,13 @@ export class CDPReplayer {
         break;
       }
       case "layoutStable": {
-        const sizeExpr = this.buildBoundingSizeExpr(step.container);
-        let lastW = -1;
-        let lastH = -1;
-        let lastChange = Date.now();
         try {
-          await this.waitUntil(async () => {
-            const sz = await this.eval<{ w: number; h: number }>(sizeExpr);
-            const w = Math.trunc((sz as any)?.w ?? -1);
-            const h = Math.trunc((sz as any)?.h ?? -1);
-            if (w !== lastW || h !== lastH) {
-              lastW = w;
-              lastH = h;
-              lastChange = Date.now();
-              return false;
-            }
-            return Date.now() - lastChange >= 800;
-          }, timeoutMs, pollMs);
+          const ok = await this.waitForLayoutStableObserver(step.container, timeoutMs, 800);
+          if (!ok) {
+            throw new Error(this.friendlyWaitTimeoutMessage(step, timeoutMs));
+          }
         } catch (e) {
+          if (e instanceof Error) throw e;
           throw new Error(this.friendlyWaitTimeoutMessage(step, timeoutMs));
         }
         break;
@@ -417,7 +445,8 @@ export class CDPReplayer {
     if (!container) {
       return "(document.body || document.documentElement)";
     }
-    const raw = JSON.stringify(String(container.selector || ""));
+    const rawSel = this.translateAriaPseudo(String(container.selector || "")) || String(container.selector || "");
+    const raw = JSON.stringify(rawSel);
     const expr =
       "(() => {" +
       "  const raw = " + raw + ";" +
@@ -426,7 +455,7 @@ export class CDPReplayer {
       "  let el = null;" +
       "  if (raw && (/^\\\\\//.test(raw) || raw.startsWith('('))) { el = byXPath(raw); }" +
       "  if (!el) el = byQuery(raw);" +
-      "  if (el && el.nodeType === Node.ELEMENT_NODE) return el;" +
+      "  if (el && el.nodeType === 1) return el;" +
       "  return (document.body || document.documentElement);" +
       "})()";
     return expr;
@@ -437,7 +466,7 @@ export class CDPReplayer {
     return (
       "(() => {" +
       `  const root = ${root};` +
-      "  const scope = (root && root.querySelectorAll) ? root : document;" +
+      "  const scope = (root && typeof root.querySelectorAll === 'function') ? root : document;" +
       "  try { return scope.querySelectorAll('*').length; } catch(e) { return 0; }" +
       "})()"
     );
@@ -448,9 +477,9 @@ export class CDPReplayer {
     return (
       "(() => {" +
       `  const root = ${root};` +
-      "  const el = (root && root.nodeType === Node.ELEMENT_NODE) ? root : (document.body || document.documentElement);" +
+      "  const el = (root && root.nodeType === 1) ? root : (document.body || document.documentElement);" +
       "  let text = '';" +
-      "  try { text = (el && el.innerText != null) ? String(el.innerText) : String(document.body?.innerText || ''); } catch(e) { text=''; }" +
+      "  try { text = (el && el.innerText != null) ? String(el.innerText) : String((document.body && document.body.innerText) || ''); } catch(e) { text=''; }" +
       "  let h = 0 >>> 0;" +
       "  for (let i = 0; i < text.length; i++) { h = (Math.imul(h, 31) + text.charCodeAt(i)) >>> 0; }" +
       "  return h >>> 0;" +
@@ -463,7 +492,7 @@ export class CDPReplayer {
     return (
       "(() => {" +
       `  const root = ${root};` +
-      "  const scope = (root && root.querySelectorAll) ? root : document;" +
+      "  const scope = (root && typeof root.querySelectorAll === 'function') ? root : document;" +
       "  try {" +
       "    const nodes = Array.from(scope.querySelectorAll('[aria-live]'));" +
       "    for (const n of nodes) { const v = (n.getAttribute('aria-live') || '').toLowerCase(); if (v && v !== 'off') { const t = (n.textContent || '').trim(); if (t.length > 0) return true; } }" +
@@ -479,7 +508,7 @@ export class CDPReplayer {
       "(() => {" +
       `  const root = ${root};` +
       "  let el = root;" +
-      "  if (!el || el.nodeType !== Node.ELEMENT_NODE) el = document.body || document.documentElement;" +
+      "  if (!el || el.nodeType !== 1) el = document.body || document.documentElement;" +
       "  try { const r = el.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) }; } catch(e) { return { w: -1, h: -1 }; }" +
       "})()"
     );
@@ -503,6 +532,134 @@ export class CDPReplayer {
         reject(err);
       }
     });
+  }
+
+  // Execute a function in page context using Runtime.callFunctionOn to avoid string concatenation issues
+  private async callFunctionOn<T>(
+    fnDeclaration: string,
+    args: any[]
+  ): Promise<T> {
+    // Create a handle to the global document element to scope the call
+    const { result: docHandle } = await this.sendCommand<any>("Runtime.evaluate", {
+      expression: "document",
+      objectGroup: "frl",
+      includeCommandLineAPI: false,
+      silent: true,
+    });
+    const objectId = docHandle?.objectId;
+    try {
+      const resp = await this.sendCommand<any>("Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: fnDeclaration,
+        arguments: args.map((v) => ({ value: v })),
+        returnByValue: true,
+        awaitPromise: true,
+      });
+      if (resp?.exceptionDetails) {
+        const msg = resp.exceptionDetails?.exception?.description || resp.exceptionDetails?.text || "callFunctionOn exception";
+        throw new Error(msg);
+      }
+      return resp?.result?.value as T;
+    } finally {
+      // Cleanup the handle
+      try { await this.sendCommand("Runtime.releaseObject", { objectId }); } catch {}
+    }
+  }
+
+  // Wait for text content changes using a MutationObserver inside the page
+  private async waitForTextChangeObserver(
+    container: import("./types").BuiltSelector | undefined,
+    timeoutMs: number
+  ): Promise<{ changed: boolean; currentText?: string; currentHtml?: string }> {
+    const selector = container?.selector ?? "";
+    // We accept either XPath-like or CSS selector input
+    const fn = `function(selector, timeoutMs) {
+      return new Promise((resolve) => {
+        var start = Date.now();
+        function byXPath(path) {
+          try {
+            var res = document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+            return res.singleNodeValue;
+          } catch (e) { return null; }
+        }
+        function byQuery(q) {
+          try { return document.querySelector(q); } catch (e) { return null; }
+        }
+        var el = null;
+        if (selector && (/^\\//.test(selector) || selector.charAt(0) === '(')) {
+          el = byXPath(selector);
+        }
+        if (!el) el = byQuery(selector);
+        if (!el || el.nodeType !== 1) el = document.body || document.documentElement;
+        var baseline = '';
+        try { baseline = (el.textContent || '').trim(); } catch (e) { baseline = ''; }
+        var observer = new MutationObserver(function() {
+          var cur = '';
+          try { cur = (el.textContent || '').trim(); } catch (e) { cur = ''; }
+          if (cur !== baseline) {
+            try { observer.disconnect(); } catch (e) {}
+            resolve({ changed: true, currentText: cur, currentHtml: String(el.innerHTML || '') });
+          }
+        });
+        try { observer.observe(el, { subtree: true, childList: true, characterData: true, attributes: true }); } catch (e) {}
+        // Poll as a fallback in case observer misses changes
+        var interval = setInterval(function() {
+          var cur = '';
+          try { cur = (el.textContent || '').trim(); } catch (e) { cur = ''; }
+          if (cur !== baseline) {
+            clearInterval(interval);
+            try { observer.disconnect(); } catch (e) {}
+            resolve({ changed: true, currentText: cur, currentHtml: String(el.innerHTML || '') });
+          }
+          if ((Date.now() - start) > timeoutMs) {
+            clearInterval(interval);
+            try { observer.disconnect(); } catch (e) {}
+            resolve({ changed: false, currentText: cur, currentHtml: String(el.innerHTML || '') });
+          }
+        }, 120);
+      });
+    }`;
+
+    // Use callFunctionOn with selector and timeout as values
+    return await this.callFunctionOn(fn, [selector, timeoutMs]);
+  }
+
+  private async waitForLayoutStableObserver(
+    container: import("./types").BuiltSelector | undefined,
+    timeoutMs: number,
+    idleMs: number
+  ): Promise<boolean> {
+    const selector = container?.selector ?? "";
+    const fn = `function(selector, timeoutMs, idleMs){
+      return new Promise(function(resolve){
+        var start = Date.now();
+        function byXPath(path){ try{ var r=document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); return r.singleNodeValue; }catch(e){ return null; } }
+        function byQuery(q){ try{ return document.querySelector(q); }catch(e){ return null; } }
+        var el = null; if (selector && (/^\\//.test(selector) || selector.charAt(0)==='(')) { el = byXPath(selector); }
+        if (!el) el = byQuery(selector);
+        if (!el || el.nodeType !== 1) el = document.body || document.documentElement;
+        // Heuristic: if the root is a small/animated/button-like control, escalate to documentElement
+        function isButtonLike(node){ try{ var tag=(node.tagName||'').toLowerCase(); if (tag==='button') return true; var role=(node.getAttribute('role')||'').toLowerCase(); if (role.indexOf('button')>=0) return true; return !!node.closest && !!node.closest('button'); }catch(e){ return false; } }
+        function hasActiveAnimations(node){ try{ var a = (node.getAnimations && node.getAnimations()) || []; return a.length>0; }catch(e){ return false; } }
+        function isTiny(node){ try{ var r=node.getBoundingClientRect(); return (r.width*r.height) < 2500; }catch(e){ return false; } }
+        if (isButtonLike(el) || hasActiveAnimations(el) || isTiny(el)) { el = document.documentElement; }
+
+        var lastRect = null; var lastChange = Date.now();
+        function rectOf(node){ try{ var r=node.getBoundingClientRect(); return [Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height)]; }catch(e){ return null; } }
+        function changed(a,b){ if(!a||!b) return true; for(var i=0;i<4;i++){ if(a[i]!==b[i]) return true; } return false; }
+
+        var obs = new MutationObserver(function(){ lastChange = Date.now(); });
+        try{ obs.observe(el, { subtree:true, attributes:true, childList:true, characterData:true }); }catch(e){}
+
+        var iv = setInterval(function(){
+          var rect = rectOf(el);
+          if (changed(rect, lastRect)) { lastRect = rect; lastChange = Date.now(); }
+          if ((Date.now()-lastChange) >= idleMs) { clearInterval(iv); try{obs.disconnect();}catch(e){} resolve(true); }
+          if ((Date.now()-start) > timeoutMs) { clearInterval(iv); try{obs.disconnect();}catch(e){} resolve(false); }
+        }, 120);
+      });
+    }`;
+    return await this.callFunctionOn<boolean>(fn, [selector, timeoutMs, idleMs]);
   }
 
   // --- helpers for friendly messages & validation ---
@@ -535,7 +692,7 @@ export class CDPReplayer {
     // Our replayer only supports CSS selectors or XPath-like paths. ARIA pseudo-selectors are not supported.
     const looksLikeXPath = /^\//.test(raw) || raw.startsWith("(");
     const looksLikeAriaPseudo = /\brole\s*=|\bname\s*=/.test(raw);
-    if (!looksLikeXPath && looksLikeAriaPseudo) {
+    if (!looksLikeXPath && looksLikeAriaPseudo && !this.translateAriaPseudo(raw)) {
       console.error(`[FRL] Malformed/unsupported container selector for replay: ${raw}. Falling back to document root.`);
     }
   }
@@ -554,6 +711,27 @@ export class CDPReplayer {
       return `Wait for ${this.friendlyPredicateName(String(pred))} failed${sel ? ` in ${JSON.stringify(sel)}` : ""}: ${base}`;
     }
     return base;
+  }
+
+  // Translate our pseudo aria selector syntax (e.g., "role=button name=Close" or "name~=Close") to CSS
+  private translateAriaPseudo(raw: string): string | null {
+    if (!raw) return null;
+    if (!/(^|\s)role\s*=|(^|\s)name(~|)\s*=/.test(raw)) return null;
+    try {
+      const roleMatch = raw.match(/(?:^|\s)role=([^\s]+)/);
+      const nameContainsMatch = raw.match(/(?:^|\s)name~=([^].*)$/);
+      const nameExactMatch = !nameContainsMatch ? raw.match(/(?:^|\s)name=([^].*)$/) : null;
+      const name = (nameContainsMatch ? nameContainsMatch[1] : nameExactMatch ? nameExactMatch[1] : "").trim();
+      const contains = !!nameContainsMatch;
+      if (!name) return null;
+      // Unescape simple backslash-escaped quotes
+      const cleaned = name.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      const op = contains ? "*=" : "=";
+      // Do not enforce role attribute since many elements have implicit roles (e.g., <button>)
+      return `[aria-label${op}${JSON.stringify(cleaned)}]`;
+    } catch {
+      return null;
+    }
   }
 }
 
