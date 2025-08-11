@@ -433,10 +433,23 @@ export class Recorder {
   }
 
   private detectContainer(el: Element): Element {
-    // Prefer meaningful ancestor: role/id/data-testid, else body
+    // Prefer meaningful ancestor: skip sentinel/presentation wrappers; choose role/id/data-* anchors; else body
     let node: Element | null = el;
     while (node && node !== document.body) {
-      if (node.hasAttribute("role") || node.id || node.hasAttribute("data-testid") || node.hasAttribute("data-test") || node.hasAttribute("data-qa")) {
+      // Skip roles that don't convey structure/content containers
+      const role = (node.getAttribute("role") || "").toLowerCase();
+      if (role === "presentation" || role === "none") {
+        node = node.parentElement;
+        continue;
+      }
+      // Skip decorative/layout-only wrappers commonly seen
+      const id = node.id || "";
+      const cls = node.className || "";
+      if (/^overlay-|^modal-backdrop|^tooltip-|^toast-/.test(id) || /\b(sentinel|backdrop|overlay|tooltip|toast)\b/i.test(String(cls))) {
+        node = node.parentElement;
+        continue;
+      }
+      if (node.hasAttribute("role") || id || node.hasAttribute("data-testid") || node.hasAttribute("data-test") || node.hasAttribute("data-qa")) {
         return node;
       }
       node = node.parentElement;

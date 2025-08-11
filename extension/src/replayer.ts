@@ -766,8 +766,10 @@ export class CDPReplayer {
         var el = null; if (selector && (/^\\//.test(selector) || selector.charAt(0)==='(')) { el = byXPath(selector); }
         if (!el) el = byQuery(selector);
         if (!el || el.nodeType !== 1) el = document.body || document.documentElement;
-        // If the element is a contenteditable/editor, use the document root as the scope for DOM additions
-        try { if ((el as any).isContentEditable === true || (el.getAttribute && el.getAttribute('contenteditable'))) { el = document.documentElement; } } catch(e) {}
+        // If the element is a contenteditable/editor, or looks too small/sentinel-like, use the document root as the scope
+        function isTiny(node){ try{ var r=node.getBoundingClientRect(); return (r.width*r.height) < 2500; }catch(e){ return false; } }
+        function isSentinel(node){ try{ var role=(node.getAttribute('role')||'').toLowerCase(); if (role==='presentation'||role==='none') return true; var id=(node.id||''); var cls=(node.className||''); return /(^overlay-|^modal-backdrop|^tooltip-|^toast-)/.test(id) || /(sentinel|backdrop|overlay|tooltip|toast)/i.test(cls); }catch(e){ return false; } }
+        try { if ((el as any).isContentEditable === true || (el.getAttribute && el.getAttribute('contenteditable')) || isTiny(el) || isSentinel(el)) { el = document.documentElement; } } catch(e) {}
         function hasAddedElement(m){ try{ if (!m) return false; if (m.addedNodes && m.addedNodes.length){ for (var i=0;i<m.addedNodes.length;i++){ var n=m.addedNodes[i]; if (n && n.nodeType === 1) return true; } } return false; }catch(e){ return false; } }
         function textOf(node){ try{ return String((node.textContent||'')).trim(); }catch(e){ return ''; } }
         function htmlOf(node){ try{ return String(node.innerHTML||''); }catch(e){ return ''; } }

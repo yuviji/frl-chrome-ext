@@ -141,19 +141,25 @@ function buildDataAttrSelector(el: Element): string | null {
 }
 
 function buildCompactCssSelector(el: Element, root: Document | ShadowRoot): string {
-  // Walk up to the root building nth-of-type chain, prefer id and stable attributes when found
+  // Walk up building a compact chain. If we encounter a stable id anchor, stop climbing there.
   const parts: string[] = [];
   let node: Element | null = el;
   const stopAt = root instanceof Document ? root.documentElement : root.host;
+  let hitAnchor = false;
 
   while (node && node !== stopAt) {
     const part = cssPart(node);
     parts.unshift(part);
+    // If this part is an id anchor, we can stop. '#id' is globally unique enough.
+    if (part.startsWith("#")) {
+      hitAnchor = true;
+      break;
+    }
     node = node.parentElement;
   }
 
-  // Include the top element if it is the stopAt element and not the root html
-  if (stopAt && stopAt !== (root instanceof Document ? root.documentElement : null)) {
+  // Only include the top element when we didn't already stop at an anchor
+  if (!hitAnchor && stopAt && stopAt !== (root instanceof Document ? root.documentElement : null)) {
     parts.unshift(cssPart(stopAt));
   }
   return parts.join(" > ");
