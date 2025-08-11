@@ -7,6 +7,7 @@
     "scripts"
   ],
   "scripts": {
-    "build": "pnpm -C extension build"
+    "build": "pnpm -C extension build",
+    "test": "pnpm -C extension test"
   }
 }

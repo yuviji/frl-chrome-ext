@@ -1,0 +1,216 @@
+import type { BuiltSelector, SelectorStrategy } from "./types";
+
+// Utilities
+const DATA_TEST_ATTRS = ["data-testid", "data-test", "data-qa"] as const;
+
+export function textHintFor(node: Element | null): string | undefined {
+  if (!node) return undefined;
+  // Prefer aria-label/name-like attributes or visible text
+  const label = (node.getAttribute("aria-label") || node.getAttribute("aria-labelledby"))?.trim();
+  if (label) return truncate(label);
+  const text = (node.textContent || "").trim().replace(/\s+/g, " ");
+  if (text) return truncate(text);
+  return undefined;
+}
+
+export function roleHintFor(node: Element | null): string | undefined {
+  if (!node) return undefined;
+  const role = node.getAttribute("role")?.trim();
+  if (role) return role;
+  // Map some common tags to implied roles
+  const tag = node.tagName.toLowerCase();
+  switch (tag) {
+    case "button":
+      return "button";
+    case "a":
+      return node.hasAttribute("href") ? "link" : undefined;
+    case "input": {
+      const type = (node.getAttribute("type") || "text").toLowerCase();
+      if (type === "checkbox") return "checkbox";
+      if (type === "radio") return "radio";
+      if (type === "submit" || type === "button") return "button";
+      return "textbox";
+    }
+    case "select":
+      return "combobox";
+    case "textarea":
+      return "textbox";
+  }
+  return undefined;
+}
+
+export function buildSelector(target: Element): BuiltSelector {
+  const { shadowChain, deepestRoot } = buildShadowChain(target);
+  const { frameChain } = buildFrameChain(deepestRoot);
+
+  // Try ARIA role+name first
+  const aria = buildAriaSelector(target);
+  if (aria) {
+    return finalize(aria, "aria", shadowChain, frameChain, target);
+  }
+
+  // Then data-* test attributes
+  const dataSel = buildDataAttrSelector(target);
+  if (dataSel) {
+    return finalize(dataSel, "data", shadowChain, frameChain, target);
+  }
+
+  // Fallback to compact CSS with nth-of-type
+  const css = buildCompactCssSelector(target, deepestRoot);
+  return finalize(css, "css", shadowChain, frameChain, target);
+}
+
+function finalize(selector: string, strategy: SelectorStrategy, shadowChain: string[], frameChain: string[], target: Element): BuiltSelector {
+  return {
+    selector,
+    strategy,
+    shadowChain,
+    frameChain,
+    textHint: textHintFor(target),
+    roleHint: roleHintFor(target),
+  };
+}
+
+function buildAriaSelector(el: Element): string | null {
+  // Prefer WAI-ARIA: role + accessible name approximation
+  const role = roleHintFor(el);
+  const name = accessibleName(el);
+  if (role && name) {
+    // We use a pseudo selector syntax: role=<role> name=<name>
+    // Consumers can translate to their selector engine (e.g., Playwright getByRole)
+    return `role=${cssEsc(role)}\x20name=${cssEsc(name)}`;
+  }
+  return null;
+}
+
+function buildDataAttrSelector(el: Element): string | null {
+  for (const attr of DATA_TEST_ATTRS) {
+    const val = el.getAttribute(attr);
+    if (val) {
+      return `[${attr}="${cssEsc(val)}"]`;
+    }
+  }
+  return null;
+}
+
+function buildCompactCssSelector(el: Element, root: Document | ShadowRoot): string {
+  // Walk up to the root building nth-of-type chain, prefer id and stable attributes when found
+  const parts: string[] = [];
+  let node: Element | null = el;
+  const stopAt = root instanceof Document ? root.documentElement : root.host;
+
+  while (node && node !== stopAt) {
+    const part = cssPart(node);
+    parts.unshift(part);
+    node = node.parentElement;
+  }
+
+  // Include the top element if it is the stopAt element and not the root html
+  if (stopAt && stopAt !== (root instanceof Document ? root.documentElement : null)) {
+    parts.unshift(cssPart(stopAt));
+  }
+  return parts.join(" > ");
+}
+
+function cssPart(node: Element): string {
+  // If element has id, prefer #id
+  const id = node.getAttribute("id");
+  if (id && isIdSafe(id)) return `#${cssEsc(id)}`;
+
+  // Prefer class if single, short, and unique among siblings of same tag
+  const className = pickStableClass(node);
+  const tag = node.tagName.toLowerCase();
+
+  if (className) {
+    return `${tag}.${className}`;
+  }
+
+  // Fallback to nth-of-type for compactness
+  const index = nthOfTypeIndex(node);
+  return `${tag}:nth-of-type(${index})`;
+}
+
+function nthOfTypeIndex(node: Element): number {
+  const tag = node.tagName;
+  let i = 0;
+  let sib: Element | null = node.parentElement?.firstElementChild as Element | null;
+  while (sib) {
+    if (sib.tagName === tag) i++;
+    if (sib === node) return i;
+    sib = sib.nextElementSibling as Element | null;
+  }
+  return 1;
+}
+
+function pickStableClass(node: Element): string | null {
+  const classList = Array.from(node.classList);
+  if (classList.length !== 1) return null;
+  const cls = classList[0];
+  // Avoid dynamic looking classes
+  if (/\d/.test(cls) || cls.length > 30) return null;
+  // Check uniqueness among same-tag siblings
+  const tag = node.tagName.toLowerCase();
+  const siblings = node.parentElement?.querySelectorAll(`${tag}.${cssEsc(cls)}`) ?? [];
+  if (siblings.length === 1) return cssEsc(cls);
+  return null;
+}
+
+function isIdSafe(id: string): boolean {
+  return !/\s/.test(id) && id.length <= 40;
+}
+
+function cssEsc(value: string): string {
+  // Basic escape for quotes and backslashes
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function truncate(text: string, max = 120): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function buildShadowChain(el: Element): { shadowChain: string[]; deepestRoot: Document | ShadowRoot } {
+  const chain: string[] = [];
+  let node: Node | null = el;
+  let currentRoot: Document | ShadowRoot = el.getRootNode() as Document | ShadowRoot;
+
+  // Walk outwards through shadow roots collecting host selectors
+  while (currentRoot instanceof ShadowRoot) {
+    const host = currentRoot.host;
+    chain.unshift(buildCompactCssSelector(host, host.getRootNode() as Document | ShadowRoot));
+    currentRoot = host.getRootNode() as Document | ShadowRoot;
+  }
+
+  return { shadowChain: chain, deepestRoot: el.getRootNode() as Document | ShadowRoot };
+}
+
+function buildFrameChain(root: Document | ShadowRoot): { frameChain: string[] } {
+  const chain: string[] = [];
+  // Only documents live inside frames. ShadowRoot implies same document.
+  if (root instanceof Document) {
+    let win: Window | null = root.defaultView;
+    while (win && win !== win.top) {
+      const frameEl = win.frameElement as Element | null;
+      if (!frameEl) break;
+      const frameHostRoot = frameEl.getRootNode() as Document | ShadowRoot;
+      chain.unshift(buildCompactCssSelector(frameEl, frameHostRoot));
+      win = frameEl.ownerDocument?.defaultView?.parent ?? null;
+    }
+  }
+  return { frameChain: chain };
+}
+
+// Very lightweight accessible name approximation
+function accessibleName(el: Element): string | null {
+  const ariaLabel = el.getAttribute("aria-label");
+  if (ariaLabel) return ariaLabel.trim();
+  const alt = (el as HTMLImageElement).alt;
+  if (typeof alt === "string" && alt.trim()) return alt.trim();
+  const title = el.getAttribute("title");
+  if (title) return title.trim();
+  const text = (el.textContent || "").trim().replace(/\s+/g, " ");
+  return text || null;
+}
+
+export {};
+
+
